@@ -1,0 +1,70 @@
+name: zz one-shot upstream sync
+
+# 由 MCP 推这个文件触发（on: push 自身），只做一件事：
+#   把 MarSeventh/CloudFlare-ImgBed 的最新提交合并进本 fork 的 main，
+#   并且「不」改 .github/workflows，以免内置 GITHUB_TOKEN 因为没有
+#   workflows 写权限而被拒。合并提交带 [skip ci]，不会触发部署。
+# 合并完成后由 MCP 单独推新版 deploy-worker.yml，那一步才触发部署。
+# 跑完请把这个文件删掉。
+
+on:
+  push:
+    paths:
+      - ".github/workflows/zz-sync-upstream-oneshot.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: zz-sync-upstream-oneshot
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: 合并上游（跳过 workflows）
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge upstream and push
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/MarSeventh/CloudFlare-ImgBed.git
+          git fetch --no-tags upstream main
+
+          BEFORE=$(git rev-parse HEAD)
+          UP=$(git rev-parse --short upstream/main)
+          echo "fork HEAD = $BEFORE"
+          echo "upstream  = $UP"
+          echo "---- 待合并提交 ----"
+          git log --oneline HEAD..upstream/main | head -40
+
+          # 三方合并，冲突一律以上游为准；先不提交，接着还原 workflows
+          git merge --no-ff --no-commit -X theirs upstream/main || true
+
+          # workflows 保持本 fork 原样：内置 token 推不动 workflow 文件
+          git rm -r -q --cached .github/workflows
+          rm -rf .github/workflows
+          git checkout "$BEFORE" -- .github/workflows
+
+          git commit -m "chore: sync upstream MarSeventh/CloudFlare-ImgBed @${UP} [skip ci]"
+
+          echo "---- 合并结果 ----"
+          git --no-pager diff --stat "$BEFORE" HEAD | tail -20
+
+          git push origin HEAD:main
+          echo "✅ 代码已推送（已跳过 CI）"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### 一次性同步" >> "$GITHUB_STEP_SUMMARY"
+          echo "状态：${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          git --no-pager log --oneline -3 >> "$GITHUB_STEP_SUMMARY" || true
